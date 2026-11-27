@@ -6,7 +6,7 @@ import { WatcherPanel } from '@/features/school/WatcherPanel';
 import { LogPanel } from '@/features/school/LogPanel';
 import { VhuLoginDialog } from './VhuLoginDialog';
 
-export function VhuPage({ soundOn, onToggleSound }) {
+export function VhuPage({ soundOn, onToggleSound, onBackHome }) {
   const [showLogin, setShowLogin] = useState(false);
   const { status, setStatus, refresh, queuedItems, addToQueue, removeQueued, clearQueued } =
     useSchoolWorkspace('vhu', soundOn);
@@ -19,6 +19,7 @@ export function VhuPage({ soundOn, onToggleSound }) {
         soundOn={soundOn}
         onToggleSound={onToggleSound}
         onOpenLogin={() => setShowLogin(true)}
+        onBackHome={onBackHome}
       />
 
       <CourseLookupCard school="vhu" onAddToQueue={addToQueue} />
