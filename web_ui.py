@@ -74,6 +74,7 @@ class WatcherManager:
         self.jobs = {}
         self.logs = []
         self.turn_id = None
+        self.quota = None
         self.login_blocked = False
         self.login_block_reason = ""
         self._login_in_flight = False
@@ -602,6 +603,190 @@ class WatcherManager:
     def _public_job(self, job):
         return {k: v for k, v in job.items() if k != "stop_event"}
 
+    def _portal_request(self, method, rel_path, params=None, payload=None, timeout=10):
+        token = os.environ.get(self.env_key, "")
+        if not token:
+            return False, "Chưa có Token. Vui lòng đăng nhập trước."
+        headers = {**self.headers, "Authorization": f"Bearer {token}"}
+        url = self.api_base + rel_path.lstrip("/")
+        try:
+            r = self.session.request(method, url, headers=headers, params=params, json=payload, timeout=timeout)
+            if r.status_code in (401, 403):
+                return False, "Token hết hạn hoặc không hợp lệ. Vui lòng đăng nhập lại."
+            try:
+                data = r.json()
+            except Exception:
+                data = None
+            if not r.ok:
+                msg = (data.get("message") or data.get("Message") or data.get("error")) if isinstance(data, dict) else r.text[:200]
+                return False, msg or f"Lỗi API {rel_path} (HTTP {r.status_code})"
+            return True, data
+        except requests.RequestException as e:
+            return False, f"Lỗi kết nối máy chủ {self.school.upper()}: {type(e).__name__}"
+
+    def _resolve_program_id(self, program_id=None):
+        if program_id:
+            return program_id
+        info = core.decode_jwt_info(os.environ.get(self.env_key, "")) or {}
+        if info.get("program_ids"):
+            return str(info["program_ids"]).split(",")[0].strip()
+        ok, progs = self.get_study_programs()
+        if ok and isinstance(progs, list) and progs:
+            return progs[0].get("StudyProgramID") or ""
+        return self.base_cfg.get("vars", {}).get("program_id", "")
+
+    def get_study_programs(self):
+        """1. GET Authen/GetAllStudyProgramRegist"""
+        return self._portal_request("GET", "Authen/GetAllStudyProgramRegist")
+
+    def get_credit_quota(self, program_id=None):
+        """2. GET Regist/GetRegistSemesterCreditQuota?StudyProgramID=..."""
+        prog_id = self._resolve_program_id(program_id)
+        if not prog_id:
+            return False, "Không xác định được mã chương trình đào tạo (StudyProgramID)."
+        ok, data = self._portal_request(
+            "GET",
+            "Regist/GetRegistSemesterCreditQuota",
+            params={"StudyProgramID": prog_id},
+        )
+        if ok and isinstance(data, dict):
+            with self.lock:
+                self.quota = data
+                if data.get("IdDot") is not None:
+                    self.turn_id = data.get("IdDot")
+        return ok, data
+
+    def get_study_types(self):
+        """3. GET Authen/GetAllStudyType"""
+        ok, data = self._portal_request("GET", "Authen/GetAllStudyType")
+        if ok and isinstance(data, list):
+            items = [x for x in data if x.get("HienThi", True)]
+            items.sort(key=lambda x: x.get("ThuTu") or 0)
+            return True, items
+        return ok, data
+
+    def get_registered_classes(self, turn_id=None, program_id=None):
+        """4. POST Regist/GetAllClassRegisted"""
+        tid = turn_id if turn_id not in (None, "") else self.turn_id
+        if tid in (None, "", 0):
+            ok_q, qdata = self.get_credit_quota(program_id=program_id)
+            if ok_q and isinstance(qdata, dict):
+                tid = qdata.get("IdDot")
+        if tid in (None, ""):
+            return False, "Chưa lấy được mã đợt đăng ký (IdDot)."
+        ok, data = self._portal_request(
+            "POST",
+            "Regist/GetAllClassRegisted",
+            payload={"ReqParam1": "0", "ReqParam2": str(tid)},
+        )
+        if ok and isinstance(data, dict):
+            return True, {"turn_id": tid, "rows": data.get("Rows") or [], "raw": data}
+        return ok, data
+
+    def get_allow_regist_classes(
+        self,
+        study_type="KH",
+        program_id=None,
+        year_study=None,
+        term_id=None,
+        keyword="",
+    ):
+        """5. POST Regist/GetAllClassAllowRegist"""
+        prog_id = self._resolve_program_id(program_id)
+        quota = self.quota if isinstance(self.quota, dict) else None
+        if not year_study or not term_id:
+            if not quota or not quota.get("YearStudy") or not quota.get("TermID"):
+                ok_q, qdata = self.get_credit_quota(program_id=prog_id)
+                if ok_q and isinstance(qdata, dict):
+                    quota = qdata
+            year_study = year_study or (quota or {}).get("YearStudy") or ""
+            term_id = term_id or (quota or {}).get("TermID") or ""
+        if not prog_id:
+            return False, "Không xác định được mã chương trình đào tạo (StudyProgramID)."
+        payload = {
+            "ReqParam1": str(prog_id),
+            "ReqParam2": str(study_type or "KH"),
+            "ReqParam3": str(year_study or ""),
+            "ReqParam4": str(term_id or ""),
+            "ReqParam5": str(keyword or ""),
+        }
+        ok, data = self._portal_request("POST", "Regist/GetAllClassAllowRegist", payload=payload)
+        if ok:
+            rows = data.get("Rows", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            return True, {
+                "program_id": prog_id,
+                "study_type": payload["ReqParam2"],
+                "year_study": payload["ReqParam3"],
+                "term_id": payload["ReqParam4"],
+                "rows": rows,
+            }
+        return ok, data
+
+    def get_portal_overview(self, study_type=None, program_id=None):
+        """Gọi đồng bộ cả 5 API cổng trường (không hardcode dữ liệu)."""
+        out = {
+            "programs": [],
+            "program_id": None,
+            "quota": None,
+            "study_types": [],
+            "active_study_type": None,
+            "registered": [],
+            "allow_regist": [],
+            "errors": {},
+        }
+        ok_p, progs = self.get_study_programs()
+        if ok_p and isinstance(progs, list):
+            out["programs"] = progs
+        else:
+            out["errors"]["programs"] = progs
+
+        prog_id = program_id or (progs[0].get("StudyProgramID") if ok_p and isinstance(progs, list) and progs else None) or self._resolve_program_id()
+        out["program_id"] = prog_id
+
+        ok_q, quota = self.get_credit_quota(program_id=prog_id)
+        if ok_q and isinstance(quota, dict):
+            out["quota"] = quota
+        else:
+            out["errors"]["quota"] = quota
+
+        ok_st, stypes = self.get_study_types()
+        if ok_st and isinstance(stypes, list):
+            out["study_types"] = stypes
+        else:
+            out["errors"]["study_types"] = stypes
+
+        chosen_st = study_type
+        if not chosen_st and out["study_types"]:
+            # Ưu tiên loại hình đầu tiên được mở theo MapID trong quota, hoặc KH nếu có
+            enabled = []
+            for st in out["study_types"]:
+                map_id = st.get("MapID")
+                if not map_id or (isinstance(out["quota"], dict) and bool(out["quota"].get(map_id))):
+                    enabled.append(st)
+            kh = next((x for x in enabled if x.get("LoaiHinh") == "KH"), None)
+            chosen_st = (kh or (enabled[0] if enabled else out["study_types"][0])).get("LoaiHinh")
+        out["active_study_type"] = chosen_st or "KH"
+
+        tid = out["quota"].get("IdDot") if isinstance(out["quota"], dict) else self.turn_id
+        ok_reg, reg_data = self.get_registered_classes(turn_id=tid, program_id=prog_id)
+        if ok_reg and isinstance(reg_data, dict):
+            out["registered"] = reg_data.get("rows") or []
+        else:
+            out["errors"]["registered"] = reg_data
+
+        ok_allow, allow_data = self.get_allow_regist_classes(
+            study_type=out["active_study_type"],
+            program_id=prog_id,
+            year_study=(out["quota"] or {}).get("YearStudy") if isinstance(out["quota"], dict) else None,
+            term_id=(out["quota"] or {}).get("TermID") if isinstance(out["quota"], dict) else None,
+        )
+        if ok_allow and isinstance(allow_data, dict):
+            out["allow_regist"] = allow_data.get("rows") or []
+        else:
+            out["errors"]["allow_regist"] = allow_data
+
+        return True, out
+
     def get_status(self):
         token = os.environ.get(self.env_key, "")
         info = core.decode_jwt_info(token)
@@ -651,10 +836,30 @@ def make_handler(managers):
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
+            qs = parse_qs(parsed.query)
+            school = qs.get("school", ["vhu"])[0]
             if path == "/api/status":
-                qs = parse_qs(parsed.query)
-                school = qs.get("school", ["vhu"])[0]
                 return self._send_json(HTTPStatus.OK, self._get_manager(school).get_status())
+            if path == "/api/portal/programs":
+                ok, data = self._get_manager(school).get_study_programs()
+                return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
+            if path == "/api/portal/quota":
+                prog_id = qs.get("program_id", [None])[0]
+                ok, data = self._get_manager(school).get_credit_quota(program_id=prog_id)
+                return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
+            if path == "/api/portal/study-types":
+                ok, data = self._get_manager(school).get_study_types()
+                return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
+            if path == "/api/portal/registered":
+                tid = qs.get("turn_id", [None])[0]
+                prog_id = qs.get("program_id", [None])[0]
+                ok, data = self._get_manager(school).get_registered_classes(turn_id=tid, program_id=prog_id)
+                return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
+            if path == "/api/portal/overview":
+                st = qs.get("study_type", [None])[0]
+                prog_id = qs.get("program_id", [None])[0]
+                ok, data = self._get_manager(school).get_portal_overview(study_type=st, program_id=prog_id)
+                return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
             if not DIST_DIR.exists():
                 return self._send_json(HTTPStatus.NOT_FOUND, {"error": "Chưa build React UI (chạy npm run build trong frontend/)"})
             rel = "index.html" if path == "/" else path.lstrip("/")
@@ -699,6 +904,15 @@ def make_handler(managers):
                 return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
             if path == "/api/lookup":
                 ok, data = manager.lookup_course(body.get("course_id", ""), body.get("study_type", "KH"))
+                return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
+            if path == "/api/portal/allow-regist":
+                ok, data = manager.get_allow_regist_classes(
+                    study_type=body.get("study_type", "KH"),
+                    program_id=body.get("program_id"),
+                    year_study=body.get("year_study"),
+                    term_id=body.get("term_id"),
+                    keyword=body.get("keyword", ""),
+                )
                 return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
             if path == "/api/jobs/start":
                 ok, data = manager.start_job(

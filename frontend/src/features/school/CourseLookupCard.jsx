@@ -1,20 +1,12 @@
-import { useState } from 'react';
-import { ListPlus, Plus, Search, X } from 'lucide-react';
-import { lookupCourse } from '@/lib/api';
+import { useMemo, useState } from 'react';
+import { BookOpen, ListPlus, Plus, Search, X } from 'lucide-react';
+import { getAllowRegistClasses, lookupCourse } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input, Select } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-
-const STUDY_TYPES = [
-  { value: 'KH', label: 'KH - Tiến độ chuẩn' },
-  { value: 'NKH', label: 'NKH - Ngoài kế hoạch' },
-  { value: 'HL', label: 'HL - Học lại' },
-  { value: 'CT', label: 'CT - Cải thiện' },
-  { value: 'HV', label: 'HV - Học vượt' },
-];
 
 let nextRowId = 1;
 function makeRow(code = '', studyType = 'KH') {
@@ -28,14 +20,62 @@ function parseCourseCodes(raw) {
     .filter(Boolean);
 }
 
-export function CourseLookupCard({ school, onAddToQueue }) {
-  const [rows, setRows] = useState(() => [makeRow(school === 'vhu' ? 'MMC407' : '', 'KH')]);
+export function CourseLookupCard({ school, portal, onAddToQueue }) {
+  const studyTypes = useMemo(() => {
+    const raw = portal?.study_types;
+    if (Array.isArray(raw) && raw.length > 0) {
+      return raw.map((st) => ({
+        value: st.LoaiHinh,
+        label: `${st.LoaiHinh} - ${st.TenChucNang}`,
+      }));
+    }
+    return [{ value: portal?.active_study_type || 'KH', label: portal?.active_study_type || 'KH' }];
+  }, [portal?.study_types, portal?.active_study_type]);
+
+  const [rows, setRows] = useState(() => [makeRow('', 'KH')]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [results, setResults] = useState([]);
   const [activeCourseId, setActiveCourseId] = useState('');
   const [selectedByCourse, setSelectedByCourse] = useState({});
+  const [showAllowList, setShowAllowList] = useState(false);
+  const [allowList, setAllowList] = useState(null);
+  const [allowLoading, setAllowLoading] = useState(false);
+
+  const displayedAllowList = allowList ?? (portal?.allow_regist || []);
+
+  async function handleToggleAllowList() {
+    const next = !showAllowList;
+    setShowAllowList(next);
+    if (next && displayedAllowList.length === 0) {
+      setAllowLoading(true);
+      try {
+        const st = rows[0]?.studyType || portal?.active_study_type || 'KH';
+        const res = await getAllowRegistClasses(school, {
+          study_type: st,
+          program_id: portal?.program_id,
+          year_study: portal?.quota?.YearStudy,
+          term_id: portal?.quota?.TermID,
+        });
+        if (res.ok) setAllowList(res.data?.rows || []);
+      } finally {
+        setAllowLoading(false);
+      }
+    }
+  }
+
+  function pickAllowedCourse(code) {
+    if (!code) return;
+    setRows((prev) => {
+      if (prev.some((r) => r.code.trim().toUpperCase() === code.toUpperCase())) return prev;
+      const emptyIdx = prev.findIndex((r) => !r.code.trim());
+      if (emptyIdx >= 0) {
+        return prev.map((r, i) => (i === emptyIdx ? { ...r, code } : r));
+      }
+      return [...prev, makeRow(code, prev[prev.length - 1]?.studyType || 'KH')];
+    });
+  }
 
   function addRow() {
     setRows((prev) => [...prev, makeRow('', prev[prev.length - 1]?.studyType || 'KH')]);
@@ -173,33 +213,75 @@ export function CourseLookupCard({ school, onAddToQueue }) {
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0 pb-3">
         <CardTitle>1. Tìm môn & Chọn lớp muốn canh</CardTitle>
-        <Button variant="outline" size="sm" onClick={addRow}>
-          <Plus className="h-3.5 w-3.5" />
-          Thêm môn
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleToggleAllowList}>
+            <BookOpen className="h-3.5 w-3.5" />
+            Môn được phép ĐK ({displayedAllowList.length})
+          </Button>
+          <Button variant="outline" size="sm" onClick={addRow}>
+            <Plus className="h-3.5 w-3.5" />
+            Thêm môn
+          </Button>
+        </div>
       </CardHeader>
 
       <CardContent className="space-y-3">
+        {showAllowList && (
+          <div className="rounded-xl border border-border bg-secondary/50 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+              <span className="font-semibold text-foreground">
+                Chọn nhanh môn được phép đăng ký từ cổng trường (bấm để điền mã môn):
+              </span>
+              <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => setShowAllowList(false)}>
+                Đóng
+              </Button>
+            </div>
+            {allowLoading ? (
+              <div className="text-xs text-muted-foreground">Đang tải danh sách môn...</div>
+            ) : displayedAllowList.length === 0 ? (
+              <div className="text-xs text-muted-foreground">
+                Chưa có danh sách môn được phép đăng ký (kiểm tra đăng nhập hoặc đợt đăng ký).
+              </div>
+            ) : (
+              <div className="flex max-h-36 flex-wrap gap-1.5 overflow-y-auto">
+                {displayedAllowList.map((m, i) => {
+                  const code = m.CurriculumID || m.StudyUnitID || m.MaMonHoc || '';
+                  const name = m.CurriculumName || m.StudyUnitName || m.TenMonHoc || '';
+                  if (!code) return null;
+                  return (
+                    <button
+                      key={`${code}-${i}`}
+                      type="button"
+                      onClick={() => pickAllowedCourse(code)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 py-1 text-xs transition-colors hover:border-primary hover:bg-blue-50 cursor-pointer"
+                      title={name}
+                    >
+                      <strong className="text-primary">{code}</strong>
+                      {name && <span className="max-w-[180px] truncate text-muted-foreground">{name}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         <form onSubmit={handleLookup} className="space-y-2">
           {rows.map((row, idx) => (
             <div key={row.id} className="flex flex-wrap items-center gap-2">
               <Input
                 value={row.code}
                 onChange={(e) => updateRow(row.id, { code: e.target.value })}
-                placeholder={
-                  school === 'vhu'
-                    ? `Mã môn ${rows.length > 1 ? `#${idx + 1} ` : ''}(VD: MMC407)`
-                    : `Nhập mã môn HUFLIT ${rows.length > 1 ? `#${idx + 1}` : ''}`
-                }
+                placeholder={`Nhập mã môn ${rows.length > 1 ? `#${idx + 1}` : ''}`}
                 className="min-w-[200px] flex-1"
               />
               <Select
                 value={row.studyType}
                 onChange={(e) => updateRow(row.id, { studyType: e.target.value })}
               >
-                {STUDY_TYPES.map((t) => (
+                {studyTypes.map((t) => (
                   <option key={t.value} value={t.value}>
                     {t.label}
                   </option>

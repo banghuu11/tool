@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getSchoolStatus, playBeep } from '@/lib/api';
+import { getPortalOverview, getSchoolStatus, playBeep } from '@/lib/api';
 
 export function useSchoolWorkspace(school, soundOn) {
   const [status, setStatus] = useState(null);
+  const [portal, setPortal] = useState(null);
+  const [portalLoading, setPortalLoading] = useState(false);
   const [queuedItems, setQueuedItems] = useState([]);
   const seenEvents = useRef(new Set());
+  const loadedTokenRef = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -25,20 +28,37 @@ export function useSchoolWorkspace(school, soundOn) {
     }
   }, [school, soundOn]);
 
-  const shouldPoll =
-    school !== 'huflit' ||
-    Boolean(status?.browser_login_active) ||
-    Boolean(status?.jobs?.some((j) => j.status === 'running' || j.status === 'waiting_token'));
+  const refreshPortal = useCallback(
+    async (opts = {}) => {
+      setPortalLoading(true);
+      try {
+        const res = await getPortalOverview(school, opts);
+        if (res.ok) {
+          setPortal(res.data);
+        }
+      } catch {
+        // ignore transient error
+      } finally {
+        setPortalLoading(false);
+      }
+    },
+    [school]
+  );
 
   useEffect(() => {
     refresh();
+    const timer = setInterval(refresh, 1000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   useEffect(() => {
-    if (!shouldPoll) return undefined;
-    const timer = setInterval(refresh, 1000);
-    return () => clearInterval(timer);
-  }, [refresh, shouldPoll]);
+    if (status?.token_valid && !loadedTokenRef.current) {
+      loadedTokenRef.current = true;
+      refreshPortal();
+    } else if (!status?.token_valid) {
+      loadedTokenRef.current = false;
+    }
+  }, [status?.token_valid, refreshPortal]);
 
   const addToQueue = useCallback((items) => {
     setQueuedItems((prev) => {
@@ -60,6 +80,9 @@ export function useSchoolWorkspace(school, soundOn) {
     status,
     setStatus,
     refresh,
+    portal,
+    portalLoading,
+    refreshPortal,
     queuedItems,
     addToQueue,
     removeQueued,
