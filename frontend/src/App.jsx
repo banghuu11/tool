@@ -1,24 +1,8 @@
 import { useCallback, useState } from 'react';
-import SchoolNav from './components/SchoolNav.jsx';
-import HomeView from './components/HomeView.jsx';
-import VhuView from './components/VhuView.jsx';
-import HuflitView from './components/HuflitView.jsx';
-
-function playBeep(freq = 880, duration = 0.25) {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.frequency.value = freq;
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
-    osc.stop(ctx.currentTime + duration);
-  } catch {
-    // ignore audio errors when browser blocks autoplay
-  }
-}
+import { Sidebar } from '@/components/layout/Sidebar';
+import { HomePage } from '@/features/home/HomePage';
+import { VhuPage } from '@/features/vhu/VhuPage';
+import { HuflitPage } from '@/features/huflit/HuflitPage';
 
 export default function App() {
   const [activePage, setActivePage] = useState(() => localStorage.getItem('activePage') || 'home');
@@ -32,19 +16,13 @@ export default function App() {
   const handleToggleSound = useCallback(() => setSoundOn((v) => !v), []);
 
   return (
-    <div className="app-shell">
-      <SchoolNav activePage={activePage} onSelect={navigate} />
+    <div className="mx-auto grid max-w-[1440px] grid-cols-1 items-start gap-5 px-4 py-5 pb-10 lg:grid-cols-[264px_minmax(0,1fr)]">
+      <Sidebar activePage={activePage} onSelect={navigate} />
 
-      <main className="main-content">
-        {activePage === 'home' && <HomeView onSelectSchool={navigate} />}
-
-        {activePage === 'vhu' && (
-          <VhuView soundOn={soundOn} onToggleSound={handleToggleSound} onBeep={playBeep} />
-        )}
-
-        {activePage === 'huflit' && (
-          <HuflitView soundOn={soundOn} onToggleSound={handleToggleSound} onBeep={playBeep} />
-        )}
+      <main className="min-w-0">
+        {activePage === 'home' && <HomePage onSelectSchool={navigate} />}
+        {activePage === 'vhu' && <VhuPage soundOn={soundOn} onToggleSound={handleToggleSound} />}
+        {activePage === 'huflit' && <HuflitPage soundOn={soundOn} onToggleSound={handleToggleSound} />}
       </main>
     </div>
   );
