@@ -6,7 +6,7 @@ import { WatcherPanel } from '@/features/school/WatcherPanel';
 import { LogPanel } from '@/features/school/LogPanel';
 import { HuflitLoginDialog } from './HuflitLoginDialog';
 
-export function HuflitPage({ soundOn, onToggleSound }) {
+export function HuflitPage({ soundOn, onToggleSound, onBackHome }) {
   const [showLogin, setShowLogin] = useState(false);
   const { status, setStatus, refresh, queuedItems, addToQueue, removeQueued, clearQueued } =
     useSchoolWorkspace('huflit', soundOn);
@@ -28,6 +28,7 @@ export function HuflitPage({ soundOn, onToggleSound }) {
         soundOn={soundOn}
         onToggleSound={onToggleSound}
         onOpenLogin={() => setShowLogin(true)}
+        onBackHome={onBackHome}
       />
 
       <CourseLookupCard school="huflit" onAddToQueue={addToQueue} />
