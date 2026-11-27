@@ -1,0 +1,14 @@
+# Secrets & local runtime files
+.env
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Node / Frontend
+frontend/node_modules/
+
+# macOS
+.DS_Store

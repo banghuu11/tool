@@ -1,0 +1,38 @@
+# Copy thành config.yaml rồi điền theo file HAR của bạn.
+open_time: "2026-12-01T08:00:00"   # để trống nếu chạy ngay
+interval: 1.0                      # giây giữa các lần thử (đừng đặt quá nhỏ)
+max_rounds: 200
+timeout: 10
+
+# Request đăng ký 1 môn. Placeholder: {course_id} và mọi khóa trong candidates.
+# ${TOKEN}, ${COOKIE} lấy từ .env
+request:
+  method: POST
+  url: "https://regist.vhu.edu.vn/CHANGE_ME"
+  body_type: json                  # json | form
+  headers:
+    Authorization: "Bearer ${TOKEN}"
+    Cookie: "${COOKIE}"
+    Content-Type: "application/json"
+  body:
+    courseId: "{course_id}"
+    classId: "{class_id}"
+
+# Chuỗi trong response để nhận biết kết quả (sửa theo thực tế)
+success_contains: ["thành công", "success"]
+full_contains: ["đã đầy", "hết chỗ", "full"]
+
+# (Tùy chọn) Canh chỗ trống: chỉ đăng ký khi còn chỗ. Lấy request tải danh sách
+# môn từ tab Network; slots_regex có 1 nhóm bắt số chỗ còn lại.
+# watch:
+#   request:
+#     method: GET
+#     url: "https://regist.vhu.edu.vn/CHANGE_ME?course={course_id}"
+#     headers: { Cookie: "${COOKIE}" }
+#   slots_regex: 'conlai"\s*:\s*(\d+)'
+
+courses:
+  - course_id: "MON001"
+    candidates:          # ưu tiên từ trên xuống
+      - class_id: "LOP_A"
+      - class_id: "LOP_B"

@@ -1,0 +1,60 @@
+interval: 1.0
+max_rounds: 100000
+timeout: 10
+# open_time: "2026-11-27T11:00:00"
+
+vars:
+  program_id: "1A242103"
+
+turn_lookup:               # tự lấy TurnID (IdDot)
+  url: "https://regist_api.vhu.edu.vn/api/Regist/GetRegistSemesterCreditQuota?StudyProgramID={program_id}"
+  headers:
+    Authorization: "Bearer ${TOKEN}"
+    apiKey: "pscRBF0zT2Mqo6vMw69YMOH43IrB2RtXBS0EHit2kzv"
+    clientId: "dtl"
+  field: IdDot
+
+request:
+  method: POST
+  url: "https://regist_api.vhu.edu.vn/api/Regist/RegistScheduleStudyUnit?TurnID={turn_id}&Action=REGIST&StudyProgramID={program_id}"
+  body_type: json
+  headers:
+    Authorization: "Bearer ${TOKEN}"
+    apiKey: "pscRBF0zT2Mqo6vMw69YMOH43IrB2RtXBS0EHit2kzv"
+    clientId: "dtl"
+    Content-Type: "application/json"
+  body: "@item"               # gửi [object lớp] như giao diện web
+
+success_contains: ["thành công"]
+full_contains: ["đầy", "hết chỗ"]
+
+# Canh chỗ trống: chỉ đăng ký khi NumberRegistOfEmpty > 0
+watch:
+  request:
+    method: POST
+    url: "https://regist_api.vhu.edu.vn/api/Regist/GetAllScheduleUnitAllowRegist"
+    headers:
+      Authorization: "Bearer ${TOKEN}"
+      apiKey: "pscRBF0zT2Mqo6vMw69YMOH43IrB2RtXBS0EHit2kzv"
+      clientId: "dtl"
+      Content-Type: "application/json"
+    body: { ReqParam1: "1A242103", ReqParam2: "KH", ReqParam3: "{course_id}" }
+  id_field: CurriculumID
+  slots_field: NumberRegistOfEmpty
+
+courses:
+  - course_id: "262MMC407"
+    candidates:            # canh cả 13 lớp, ưu tiên từ trên xuống
+      - class_id: "262MMC40701"
+      - class_id: "262MMC40702"
+      - class_id: "262MMC40703"
+      - class_id: "262MMC40704"
+      - class_id: "262MMC40705"
+      - class_id: "262MMC40706"
+      - class_id: "262MMC40707"
+      - class_id: "262MMC40708"
+      - class_id: "262MMC40709"
+      - class_id: "262MMC40710"
+      - class_id: "262MMC40711"
+      - class_id: "262MMC40712"
+      - class_id: "262MMC40713"

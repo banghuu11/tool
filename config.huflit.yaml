@@ -1,0 +1,43 @@
+interval: 1.0
+max_rounds: 100000
+timeout: 10
+
+vars:
+  program_id: "DHDT2023PM"
+
+turn_lookup:
+  url: "https://dkmhapi.huflit.edu.vn/api/Regist/GetRegistSemesterCreditQuota?StudyProgramID={program_id}"
+  headers:
+    Authorization: "Bearer ${HUFLIT_TOKEN}"
+    Origin: "https://dkmh.huflit.edu.vn"
+    Referer: "https://dkmh.huflit.edu.vn/"
+  field: IdDot
+
+request:
+  method: POST
+  url: "https://dkmhapi.huflit.edu.vn/api/Regist/RegistScheduleStudyUnit?TurnID={turn_id}&Action=REGIST&StudyProgramID={program_id}"
+  body_type: json
+  headers:
+    Authorization: "Bearer ${HUFLIT_TOKEN}"
+    Origin: "https://dkmh.huflit.edu.vn"
+    Referer: "https://dkmh.huflit.edu.vn/"
+    Content-Type: "application/json"
+  body: "@item"
+
+success_contains: ["thành công"]
+full_contains: ["đầy", "hết chỗ"]
+
+watch:
+  request:
+    method: POST
+    url: "https://dkmhapi.huflit.edu.vn/api/Regist/GetAllScheduleUnitAllowRegist"
+    headers:
+      Authorization: "Bearer ${HUFLIT_TOKEN}"
+      Origin: "https://dkmh.huflit.edu.vn"
+      Referer: "https://dkmh.huflit.edu.vn/"
+      Content-Type: "application/json"
+    body: { ReqParam1: "{program_id}", ReqParam2: "KH", ReqParam3: "{course_id}" }
+  id_field: CurriculumID
+  slots_field: NumberRegistOfEmpty
+
+courses: []
