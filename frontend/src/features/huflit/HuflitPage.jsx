@@ -47,6 +47,8 @@ export function HuflitPage({ soundOn, onToggleSound, onBackHome }) {
 
       <HuflitLoginDialog
         open={showLogin}
+        status={status}
+        onStatusUpdate={setStatus}
         onClose={() => setShowLogin(false)}
         onSuccess={(newStatus) => {
           setStatus(newStatus);

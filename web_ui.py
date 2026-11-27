@@ -37,6 +37,7 @@ SCHOOLS = {
         "config": "config.huflit.yaml",
         "env_key": "HUFLIT_TOKEN",
         "api_base": "https://dkmhapi.huflit.edu.vn/api/",
+        "login_url": "https://dkmh.huflit.edu.vn/student",
         "headers": {
             "Content-Type": "application/json",
             "Origin": "https://dkmh.huflit.edu.vn",
@@ -57,6 +58,7 @@ class WatcherManager:
         env_key="TOKEN",
         api_base=core.VHU_API_BASE,
         headers=None,
+        login_url=None,
     ):
         self.school = school
         self.config_path = str(BASE_DIR / config_path)
@@ -64,6 +66,7 @@ class WatcherManager:
         self.env_key = env_key
         self.api_base = api_base
         self.headers = headers or core.VHU_DEFAULT_HEADERS
+        self.login_url = login_url
         core.load_env(self.env_path)
         self.base_cfg = yaml.safe_load(open(self.config_path, encoding="utf-8"))
         self.session = core.make_session()
@@ -71,6 +74,11 @@ class WatcherManager:
         self.jobs = {}
         self.logs = []
         self.turn_id = None
+        self.login_blocked = False
+        self.login_block_reason = ""
+        self._login_in_flight = False
+        self.browser_login_active = False
+        self.browser_login_error = ""
         self.token_event = threading.Event()
         if os.environ.get(self.env_key):
             self.token_event.set()
@@ -117,18 +125,42 @@ class WatcherManager:
         return False
 
     def login(self, username, password, phonenumber=""):
-        ok, res = core.login_vhu(
-            self.session,
-            username,
-            password,
-            phonenumber=phonenumber,
-            api_base=self.api_base,
-            headers=self.headers,
-            school_name=self.school.upper(),
-        )
+        with self.lock:
+            if self._login_in_flight:
+                return False, "Đang xử lý yêu cầu đăng nhập, vui lòng không gửi lặp lại."
+            if self.login_blocked:
+                return False, (
+                    f"Đã dừng đăng nhập để tránh spam/khóa tài khoản ({self.login_block_reason}). "
+                    "Hệ thống không cho thử lại — hãy kiểm tra trực tiếp trên cổng trường hoặc dùng tab Dán Token thủ công."
+                )
+            self._login_in_flight = True
+
+        try:
+            ok, res = core.login_vhu(
+                self.session,
+                username,
+                password,
+                phonenumber=phonenumber,
+                api_base=self.api_base,
+                headers=self.headers,
+                school_name=self.school.upper(),
+            )
+        finally:
+            with self.lock:
+                self._login_in_flight = False
+
         if not ok:
-            self.add_log("error", f"❌ Đăng nhập thất bại: {res}")
-            return False, res
+            reason = str(res)
+            with self.lock:
+                self.login_blocked = True
+                self.login_block_reason = reason
+            warn_msg = (
+                f"Đăng nhập thất bại: {reason}. "
+                "Đã dừng hẳn cơ chế đăng nhập để tránh spam/khóa tài khoản (không thử lại). "
+                "Vui lòng kiểm tra trên cổng trường hoặc chuyển sang Dán Token thủ công."
+            )
+            self.add_log("error", f"🛑 {warn_msg}")
+            return False, warn_msg
         token = core.save_env_token(res["Token"], self.env_path, env_key=self.env_key)
         self.token_event.set()
         self._refresh_turn_id()
@@ -148,6 +180,9 @@ class WatcherManager:
             exp_str = datetime.fromtimestamp(exp).strftime("%H:%M:%S %d/%m/%Y")
             return False, f"Token này đã hết hạn lúc {exp_str}. Vui lòng lấy token mới từ cổng {self.school.upper()}."
         core.save_env_token(clean, self.env_path, env_key=self.env_key)
+        with self.lock:
+            self.login_blocked = False
+            self.login_block_reason = ""
         self.token_event.set()
         ok = self._refresh_turn_id()
         self.add_log(
@@ -156,6 +191,264 @@ class WatcherManager:
             + ("" if ok else " (Chưa lấy được TurnID — cổng có thể chưa mở đợt đăng ký)"),
         )
         return True, self.get_status()
+
+    @staticmethod
+    def _extract_valid_jwt(raw):
+        """Trích xuất chuỗi JWT hợp lệ, chưa hết hạn từ header hoặc giá trị localStorage."""
+        if not raw or not isinstance(raw, str):
+            return None
+        candidates = [raw]
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                for key in ("Token", "token", "access_token", "accessToken"):
+                    val = parsed.get(key)
+                    if isinstance(val, str):
+                        candidates.insert(0, val)
+            elif isinstance(parsed, str):
+                candidates.insert(0, parsed)
+        except Exception:
+            pass
+        now = time.time()
+        for c in candidates:
+            clean = c.strip().strip('"')
+            if clean.lower().startswith("bearer "):
+                clean = clean[7:].strip()
+            info = core.decode_jwt_info(clean)
+            if info and info.get("id"):
+                exp = info.get("exp")
+                if not exp or exp > now:
+                    return clean
+        return None
+
+    def start_browser_login(self, timeout=300, username="", password=""):
+        if not self.login_url:
+            return False, f"Trường {self.school.upper()} chưa cấu hình đăng nhập qua trình duyệt."
+        try:
+            import playwright.sync_api  # noqa: F401
+        except ImportError:
+            return False, "Chưa cài Playwright. Hãy chạy: pip install playwright"
+
+        with self.lock:
+            if self.browser_login_active:
+                return False, "Trình duyệt đăng nhập đang mở, vui lòng hoàn tất trên cửa sổ đó."
+            self.browser_login_active = True
+            self.browser_login_error = ""
+
+        self.add_log("info", f"🌐 Đang mở trình duyệt đăng nhập {self.school.upper()} ({self.login_url})...")
+        t = threading.Thread(
+            target=self._run_browser_login,
+            args=(timeout, (username or "").strip(), password or ""),
+            daemon=True,
+        )
+        t.start()
+        return True, self.get_status()
+
+    def _launch_clean_browser(self, playwright, headless=True):
+        """Mở Chrome/Edge phiên sạch (chạy ẩn khi có sẵn TK/MK, không lưu cookie/profile)."""
+        base_kwargs = {
+            "headless": headless,
+            "chromium_sandbox": True,
+            "ignore_default_args": ["--enable-automation"],
+            "args": [
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--window-size=1280,900",
+                "--password-store=basic",
+            ],
+        }
+        last_err = None
+        for channel in ("chrome", "msedge", None):
+            try:
+                kwargs = dict(base_kwargs)
+                if channel:
+                    kwargs["channel"] = channel
+                return playwright.chromium.launch(**kwargs)
+            except Exception as e:
+                last_err = e
+        raise last_err
+
+    def _auto_login_huflit(self, page, username, password):
+        """Tự động bấm Office 365 (bắt cả popup/tab mới) và điền TK/MK 1 lần, không spam thử lại."""
+        if not username or not password:
+            return None
+
+        auth_page = page
+        # 1. Bấm nút "Đăng nhập với Office 365" và bắt tab/popup mới do MSAL mở ra (nếu có)
+        try:
+            o365_btn = page.locator("button:has-text('Office 365')").first
+            if o365_btn.is_visible(timeout=5000):
+                try:
+                    with page.context.expect_page(timeout=8000) as popup_info:
+                        o365_btn.click()
+                    auth_page = popup_info.value
+                    auth_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    # Trường hợp chuyển trang ngay trên tab hiện tại
+                    if len(page.context.pages) > 1:
+                        auth_page = page.context.pages[-1]
+        except Exception:
+            pass
+
+        # 2. Nếu Microsoft hiện trang "Pick an account", bấm "Use another account" để nhập đúng TK vừa điền
+        try:
+            other_acc = auth_page.locator("#otherTile").first
+            if other_acc.is_visible(timeout=2000):
+                other_acc.click()
+        except Exception:
+            pass
+
+        # 3. Điền tài khoản / email Microsoft
+        try:
+            email_input = auth_page.locator("input[name='loginfmt'], input[type='email']").first
+            email_input.wait_for(state="visible", timeout=15000)
+            email_input.fill(username)
+            auth_page.locator("#idSIButton9, input[type='submit']").first.click()
+            auth_page.wait_for_timeout(800)
+            err_el = auth_page.locator("#usernameError").first
+            if err_el.is_visible(timeout=800):
+                return f"Sai tài khoản/email: {err_el.inner_text().strip()}"
+        except Exception:
+            pass
+
+        # 4. Điền mật khẩu Microsoft
+        try:
+            pwd_input = auth_page.locator("input[name='passwd'], input[type='password']").first
+            pwd_input.wait_for(state="visible", timeout=15000)
+            pwd_input.fill(password)
+            auth_page.locator("#idSIButton9, input[type='submit']").first.click()
+            auth_page.wait_for_timeout(1200)
+            err_el = auth_page.locator("#passwordError").first
+            if err_el.is_visible(timeout=1000):
+                return f"Sai mật khẩu: {err_el.inner_text().strip()}"
+        except Exception:
+            return None
+
+        # 5. Nếu hiện hỏi "Stay signed in?" thì bấm Yes (sau đó popup tự đóng về tab chính)
+        try:
+            if not auth_page.is_closed():
+                kmsi = auth_page.locator("#KmsiDescription, input[name='DontShowAgain']").first
+                if kmsi.is_visible(timeout=3000):
+                    auth_page.locator("#idSIButton9, input[type='submit']").first.click()
+        except Exception:
+            pass
+
+        return None
+
+    def _run_browser_login(self, timeout=300, username="", password=""):
+        from playwright.sync_api import sync_playwright
+
+        found_token = {"value": None}
+        api_host = urlparse(self.api_base).netloc.lower()
+        existing_valid = self._extract_valid_jwt(os.environ.get(self.env_key, ""))
+        browser = None
+        context = None
+        try:
+            with sync_playwright() as p:
+                browser = self._launch_clean_browser(p, headless=bool(username and password))
+                context = browser.new_context(no_viewport=True)
+
+                def accept_token(tok):
+                    if not tok:
+                        return False
+                    if existing_valid and tok == existing_valid:
+                        return False
+                    found_token["value"] = tok
+                    return True
+
+                def on_request(req):
+                    if found_token["value"]:
+                        return
+                    try:
+                        if api_host and api_host not in req.url.lower():
+                            return
+                        auth = req.headers.get("authorization") or req.headers.get("Authorization")
+                        accept_token(self._extract_valid_jwt(auth))
+                    except Exception:
+                        pass
+
+                context.on("request", on_request)
+                page = context.pages[0] if context.pages else context.new_page()
+                page.bring_to_front()
+                page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
+
+                if username and password and not found_token["value"]:
+                    login_err = self._auto_login_huflit(page, username, password)
+                    if login_err:
+                        with self.lock:
+                            self.browser_login_error = f"{login_err} (Đã dừng, không tự thử lại)."
+                        self.add_log("error", f"🛑 {self.browser_login_error}")
+                        return
+
+                deadline = time.time() + timeout
+                while time.time() < deadline and not found_token["value"]:
+                    pages = list(context.pages)
+                    if not pages or all(pg.is_closed() for pg in pages):
+                        break
+                    for pg in pages:
+                        if pg.is_closed():
+                            continue
+                        try:
+                            storage = pg.evaluate(
+                                """() => {
+                                    const out = {};
+                                    for (let i = 0; i < localStorage.length; i++) {
+                                        const k = localStorage.key(i);
+                                        out[k] = localStorage.getItem(k);
+                                    }
+                                    return out;
+                                }"""
+                            )
+                            if isinstance(storage, dict):
+                                values = []
+                                if "authorizationData" in storage:
+                                    values.append(storage["authorizationData"])
+                                values.extend(v for k, v in storage.items() if k != "authorizationData")
+                                for val in values:
+                                    if accept_token(self._extract_valid_jwt(val)):
+                                        break
+                        except Exception:
+                            pass
+                        if found_token["value"]:
+                            break
+                    if not found_token["value"]:
+                        try:
+                            alive = next((pg for pg in context.pages if not pg.is_closed()), None)
+                            if alive is None:
+                                break
+                            alive.wait_for_timeout(500)
+                        except Exception:
+                            time.sleep(0.5)
+
+                if found_token["value"]:
+                    ok, res = self.set_token(found_token["value"])
+                    if not ok:
+                        with self.lock:
+                            self.browser_login_error = str(res)
+                        self.add_log("error", f"❌ Lưu Token {self.school.upper()} thất bại: {res}")
+                else:
+                    msg = "Đã đóng trình duyệt hoặc hết thời gian chờ trước khi lấy được Token."
+                    with self.lock:
+                        self.browser_login_error = msg
+                    self.add_log("warn", f"⚠️ {msg}")
+        except Exception as e:
+            msg = f"Lỗi mở trình duyệt Playwright: {e}"
+            with self.lock:
+                self.browser_login_error = msg
+            self.add_log("error", f"❌ {msg}")
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            with self.lock:
+                self.browser_login_active = False
 
     def lookup_course(self, raw_code, study_type="KH"):
         code = (raw_code or "").strip().upper()
@@ -324,6 +617,10 @@ class WatcherManager:
                 "expires_at": datetime.fromtimestamp(exp).strftime("%H:%M:%S %d/%m/%Y") if exp else None,
                 "remaining_seconds": remaining,
                 "turn_id": self.turn_id,
+                "login_blocked": self.login_blocked,
+                "login_block_reason": self.login_block_reason,
+                "browser_login_active": self.browser_login_active,
+                "browser_login_error": self.browser_login_error,
                 "jobs": [self._public_job(j) for j in self.jobs.values()],
                 "logs": list(self.logs[-120:]),
             }
@@ -387,7 +684,16 @@ def make_handler(managers):
                     body.get("password", ""),
                     body.get("phonenumber", ""),
                 )
-                return self._send_json(HTTPStatus.OK if ok else HTTPStatus.UNAUTHORIZED, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
+                return self._send_json(
+                    HTTPStatus.OK if ok else (HTTPStatus.TOO_MANY_REQUESTS if manager.login_blocked else HTTPStatus.UNAUTHORIZED),
+                    {"ok": ok, "data": data if ok else None, "error": None if ok else data, "blocked": manager.login_blocked},
+                )
+            if path == "/api/login/browser":
+                ok, data = manager.start_browser_login(
+                    username=body.get("username", ""),
+                    password=body.get("password", ""),
+                )
+                return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
             if path == "/api/token":
                 ok, data = manager.set_token(body.get("token", ""))
                 return self._send_json(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, {"ok": ok, "data": data if ok else None, "error": None if ok else data})
@@ -430,6 +736,7 @@ def main():
             env_key=scfg["env_key"],
             api_base=scfg["api_base"],
             headers=scfg["headers"],
+            login_url=scfg.get("login_url"),
         )
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(managers))
     url = f"http://127.0.0.1:{args.port}"

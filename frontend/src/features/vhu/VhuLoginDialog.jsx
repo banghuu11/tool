@@ -4,38 +4,41 @@ import { Dialog } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input, Textarea } from '@/components/ui/input';
 
-export function VhuLoginDialog({ open, onClose, onSuccess }) {
+export function VhuLoginDialog({ open, loginBlocked = false, loginBlockReason = '', onClose, onSuccess }) {
   const [tab, setTab] = useState('account');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [phonenumber, setPhonenumber] = useState('');
-  const [needPhone, setNeedPhone] = useState(false);
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(false);
+  const [blockedLocal, setBlockedLocal] = useState(false);
   const [error, setError] = useState('');
+
+  const isBlocked = loginBlocked || blockedLocal;
 
   async function handleLogin(e) {
     e.preventDefault();
+    if (loading || isBlocked) return;
     setError('');
     setLoading(true);
     try {
       const data = await loginAccount('vhu', { username, password, phonenumber });
       if (!data.ok) {
-        const msg = data.error || 'Đăng nhập thất bại.';
-        if (msg.toLowerCase().includes('phonenumber')) {
-          setNeedPhone(true);
-          setError('Hệ thống yêu cầu nhập Số điện thoại để đăng nhập.');
-        } else {
-          setError(msg);
-        }
+        setBlockedLocal(true);
+        setPassword('');
+        setError(
+          data.error ||
+            'Đăng nhập thất bại. Đã dừng hẳn để tránh spam/khóa tài khoản — không thử lại.'
+        );
       } else {
         setPassword('');
         setPhonenumber('');
-        setNeedPhone(false);
+        setBlockedLocal(false);
         onSuccess(data.data);
       }
     } catch {
-      setError('Không kết nối được tới server cục bộ.');
+      setBlockedLocal(true);
+      setError('Không kết nối được tới server cục bộ. Đã dừng đăng nhập để tránh gửi lặp.');
     } finally {
       setLoading(false);
     }
@@ -43,6 +46,7 @@ export function VhuLoginDialog({ open, onClose, onSuccess }) {
 
   async function handleSaveToken(e) {
     e.preventDefault();
+    if (loading) return;
     setError('');
     setLoading(true);
     try {
@@ -51,6 +55,7 @@ export function VhuLoginDialog({ open, onClose, onSuccess }) {
         setError(data.error || 'Token không hợp lệ.');
       } else {
         setToken('');
+        setBlockedLocal(false);
         onSuccess(data.data);
       }
     } catch {
@@ -88,7 +93,32 @@ export function VhuLoginDialog({ open, onClose, onSuccess }) {
         </Button>
       </div>
 
-      {error && (
+      {tab === 'account' && isBlocked && (
+        <div className="mb-3 space-y-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+          <div className="font-semibold">⚠️ Đã dừng đăng nhập để chống spam / khóa tài khoản</div>
+          <div>
+            {error ||
+              (loginBlockReason
+                ? `Lần thử trước thất bại: ${loginBlockReason}.`
+                : 'Lần đăng nhập trước không thành công.')}{' '}
+            Tool sẽ không thử lại bằng mật khẩu.
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 bg-white text-xs"
+            onClick={() => {
+              setTab('token');
+              setError('');
+            }}
+          >
+            Chuyển sang Dán Token thủ công
+          </Button>
+        </div>
+      )}
+
+      {error && !(tab === 'account' && isBlocked) && (
         <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
           {error}
         </div>
@@ -105,6 +135,7 @@ export function VhuLoginDialog({ open, onClose, onSuccess }) {
               placeholder="VD: 241A211088"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              disabled={loading || isBlocked}
               required
               autoFocus
             />
@@ -117,26 +148,17 @@ export function VhuLoginDialog({ open, onClose, onSuccess }) {
               placeholder="Nhập mật khẩu cổng đăng ký"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              disabled={loading || isBlocked}
               required
             />
           </div>
 
-          {needPhone && (
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Số điện thoại</label>
-              <Input
-                type="tel"
-                placeholder="VD: 0901234567"
-                value={phonenumber}
-                onChange={(e) => setPhonenumber(e.target.value)}
-                required
-                autoFocus
-              />
-            </div>
-          )}
-
-          <Button type="submit" disabled={loading} className="w-full">
-            {loading ? 'Đang đăng nhập...' : 'Đăng nhập & Lấy Token'}
+          <Button type="submit" disabled={loading || isBlocked} className="w-full">
+            {loading
+              ? 'Đang đăng nhập...'
+              : isBlocked
+                ? 'Đã dừng đăng nhập (không thử lại)'
+                : 'Đăng nhập & Lấy Token'}
           </Button>
         </form>
       ) : (

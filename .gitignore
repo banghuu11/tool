@@ -1,6 +1,7 @@
 # Secrets & local runtime files
 .env
 *.log
+.browser_profiles/
 
 # Python
 .venv/

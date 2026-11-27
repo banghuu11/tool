@@ -1,10 +1,10 @@
-import { useMemo, useState } from 'react';
-import { ExternalLink } from 'lucide-react';
-import { saveSchoolToken } from '@/lib/api';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ExternalLink, KeyRound, Loader2 } from 'lucide-react';
+import { saveSchoolToken, startBrowserLogin } from '@/lib/api';
 import { Dialog } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Textarea } from '@/components/ui/input';
+import { Input, Textarea } from '@/components/ui/input';
 
 function previewJwt(raw) {
   const clean = (raw || '').trim().replace(/^"+|"+$/g, '').replace(/^bearer\s+/i, '').trim();
@@ -40,12 +40,58 @@ function previewJwt(raw) {
   }
 }
 
-export function HuflitLoginDialog({ open, onClose, onSuccess }) {
+export function HuflitLoginDialog({ open, status, onStatusUpdate, onClose, onSuccess }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(false);
+  const [launchingBrowser, setLaunchingBrowser] = useState(false);
   const [error, setError] = useState('');
+  const wasBrowserActive = useRef(false);
 
   const info = useMemo(() => previewJwt(token), [token]);
+  const browserActive = Boolean(status?.browser_login_active);
+
+  useEffect(() => {
+    if (!open) {
+      wasBrowserActive.current = false;
+      return;
+    }
+    if (browserActive) {
+      wasBrowserActive.current = true;
+      return;
+    }
+    if (wasBrowserActive.current && !browserActive) {
+      wasBrowserActive.current = false;
+      if (status?.browser_login_error) {
+        setError(status.browser_login_error);
+      } else if (status?.token_valid) {
+        setError('');
+        onSuccess(status);
+      }
+    }
+  }, [open, browserActive, status, onSuccess]);
+
+  async function handleOpenBrowserLogin(e) {
+    e.preventDefault();
+    if (launchingBrowser || browserActive) return;
+    setError('');
+    setLaunchingBrowser(true);
+    try {
+      const data = await startBrowserLogin('huflit', { username, password });
+      setPassword('');
+      if (!data.ok) {
+        setError(data.error || 'Không mở được trình duyệt đăng nhập HUFLIT.');
+      } else {
+        wasBrowserActive.current = true;
+        if (data.data && onStatusUpdate) onStatusUpdate(data.data);
+      }
+    } catch {
+      setError('Không kết nối được tới server cục bộ.');
+    } finally {
+      setLaunchingBrowser(false);
+    }
+  }
 
   async function handleSaveToken(e) {
     e.preventDefault();
@@ -82,8 +128,56 @@ export function HuflitLoginDialog({ open, onClose, onSuccess }) {
       description="Token được lưu riêng vào biến HUFLIT_TOKEN trong file .env cục bộ."
       className="max-w-lg"
     >
+      <form onSubmit={handleOpenBrowserLogin} className="mb-4 space-y-2.5 rounded-xl border border-primary/25 bg-primary/5 p-3.5">
+        <div className="text-xs font-bold text-foreground">
+          Cách 1 (Khuyên dùng): Đăng nhập tài khoản HUFLIT
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Nhập tài khoản Office 365 HUFLIT — tool sẽ tự động đăng nhập ngầm, bắt &amp; lưu Token
+          cục bộ. (Mật khẩu không lưu lại.)
+        </p>
+        <div className="space-y-2">
+          <Input
+            type="text"
+            placeholder="Email sinh viên (VD: 23dh112530@st.huflit.edu.vn)"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            disabled={launchingBrowser || browserActive || loading}
+            required
+            autoFocus
+          />
+          <Input
+            type="password"
+            placeholder="Mật khẩu Office 365"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={launchingBrowser || browserActive || loading}
+            required
+          />
+        </div>
+        <Button
+          type="submit"
+          disabled={launchingBrowser || browserActive || loading}
+          className="w-full"
+        >
+          {launchingBrowser || browserActive ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Đang đăng nhập...
+            </>
+          ) : (
+            <>
+              <KeyRound className="h-4 w-4" />
+              Đăng nhập
+            </>
+          )}
+        </Button>
+      </form>
+
       <div className="mb-4 rounded-xl border border-border bg-secondary/60 p-3.5 text-xs">
-        <div className="mb-1.5 font-bold text-foreground">Hướng dẫn lấy Token HUFLIT (3 bước):</div>
+        <div className="mb-1.5 font-bold text-foreground">
+          Cách 2: Dán Token thủ công (nếu không dùng trình duyệt)
+        </div>
         <ol className="list-decimal space-y-1 pl-4 text-muted-foreground">
           <li>
             Đăng nhập trên{' '}

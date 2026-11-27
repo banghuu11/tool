@@ -16,6 +16,10 @@ export function loginAccount(school, { username, password, phonenumber = '' }) {
   return postJson('/api/login', { school, username, password, phonenumber });
 }
 
+export function startBrowserLogin(school, { username = '', password = '' } = {}) {
+  return postJson('/api/login/browser', { school, username, password });
+}
+
 export function saveSchoolToken(school, token) {
   return postJson('/api/token', { school, token });
 }

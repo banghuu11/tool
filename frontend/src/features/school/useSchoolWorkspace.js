@@ -25,11 +25,20 @@ export function useSchoolWorkspace(school, soundOn) {
     }
   }, [school, soundOn]);
 
+  const shouldPoll =
+    school !== 'huflit' ||
+    Boolean(status?.browser_login_active) ||
+    Boolean(status?.jobs?.some((j) => j.status === 'running' || j.status === 'waiting_token'));
+
   useEffect(() => {
     refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!shouldPoll) return undefined;
     const timer = setInterval(refresh, 1000);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, shouldPoll]);
 
   const addToQueue = useCallback((items) => {
     setQueuedItems((prev) => {

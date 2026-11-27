@@ -38,6 +38,8 @@ export function VhuPage({ soundOn, onToggleSound, onBackHome }) {
 
       <VhuLoginDialog
         open={showLogin}
+        loginBlocked={Boolean(status?.login_blocked)}
+        loginBlockReason={status?.login_block_reason || ''}
         onClose={() => setShowLogin(false)}
         onSuccess={(newStatus) => {
           setStatus(newStatus);
